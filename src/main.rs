@@ -13,6 +13,8 @@ mod keys;
 mod layout;
 mod layout_sync;
 mod links;
+#[cfg(target_os = "linux")]
+mod linux_launcher;
 mod model;
 mod mirror;
 mod mirror_sync;
@@ -186,6 +188,9 @@ fn main() {
         // Mods run programs already; the user's own links (dotfiles, Nix) may point out.
         .with_assets(gpui_shell::AppAssets::new(mods::app_dir()).following_links())
         .run(move |cx| {
+            // Linux desktop notifications must match the installed desktop entry.
+            #[cfg(target_os = "linux")]
+            cx.set_app_identity("herdr-app", "Herdr");
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
                 tracing::warn!("bundled fonts not loaded: {e:#}");
@@ -209,7 +214,14 @@ fn main() {
                 mods::finish_shared();
                 telemetry::quit();
                 let _ = update::apply();
-                async {}
+                #[cfg(target_os = "linux")]
+                let launcher_clear = linux_launcher::clear().map(|done| cx.background_executor().spawn(async move {
+                    let _ = done.recv_timeout(std::time::Duration::from_millis(2200));
+                }));
+                async move {
+                    #[cfg(target_os = "linux")]
+                    if let Some(task) = launcher_clear { task.await; }
+                }
             })
             .detach();
             #[cfg(target_os = "macos")]

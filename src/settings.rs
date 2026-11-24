@@ -373,7 +373,10 @@ pub struct Person {
     /// When an alert also goes to the system's notification center (alert.rs).
     #[serde(skip_serializing_if = "SystemNotifications::is_background")]
     pub system_notifications: SystemNotifications,
-    /// Bounce the Dock icon when an agent needs you while Herdr is in the background.
+    /// Opt in to reading supported agents' last replies for completion notifications.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub notification_agent_output: bool,
+    /// Background attention: Linux completion/blocked/error, other platforms blocked/error.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dock_bounce: bool,
     /// The herdr-core to use, when it isn't where Herdr looks (core_bin.rs).
@@ -486,6 +489,7 @@ impl Default for Person {
             zoom: 1.0,
             sounds: Sounds::default(),
             system_notifications: SystemNotifications::Background,
+            notification_agent_output: false,
             dock_bounce: false,
             core: None,
             font: None,
@@ -553,6 +557,7 @@ pub struct Settings {
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
     pub system_notifications: SystemNotifications,
+    pub notification_agent_output: bool,
     pub dock_bounce: bool,
 }
 
@@ -603,6 +608,7 @@ impl Default for Settings {
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
             system_notifications: SystemNotifications::Background,
+            notification_agent_output: false,
             dock_bounce: false,
         }
     }
@@ -645,6 +651,7 @@ impl Settings {
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
             system_notifications: person.system_notifications,
+            notification_agent_output: person.notification_agent_output,
             dock_bounce: person.dock_bounce,
             clipboard_write: person.clipboard_write,
             copy_on_select: person.copy_on_select,
@@ -1138,7 +1145,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), font_weight_bold: Some(700), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), system_notifications: SystemNotifications::Off, dock_bounce: true, ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), font_weight_bold: Some(700), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), system_notifications: SystemNotifications::Off, notification_agent_output: true, dock_bounce: true, ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

@@ -227,18 +227,18 @@ export default class Settings extends View {
       .child(b("plus", "+", onPlus));
   }
 
-  toggle(t, id, on, onClick) {
+  toggle(t, id, on, onClick, disabled = false) {
     return div()
       .id(id)
       .w(36)
       .h(20)
       .rounded(10)
       .p(2)
-      .cursor_pointer()
+      .when(!disabled, (el) => el.cursor_pointer().on_click(onClick))
+      .when(disabled, (el) => el.opacity(0.4))
       .bg(on ? t.accent : t.hover)
       .flex()
       .when(on, (el) => el.justify_end())
-      .on_click(onClick)
       .child(div().w(16).h(16).rounded(8).bg(on ? t.accent_foreground : t.muted));
   }
 
@@ -775,8 +775,24 @@ export default class Settings extends View {
       .child(
         this.row(
           t,
-          "Bounce the Dock icon",
-          "When an agent needs you while Herdr is in the background.",
+          "Include agent's last reply",
+          "Read the last reply for completion notifications. Currently supports local OpenCode on Linux; never reads the terminal screen. Replies may appear on the lock screen and in notification history.",
+          this.toggle(t, "st-notification-agent-output", this.person.notification_agent_output === true, (_e, cx) =>
+            this.change((p) => {
+              if (p.notification_agent_output) delete p.notification_agent_output;
+              else p.notification_agent_output = true;
+            }, cx),
+            this.person.system_notifications === "off",
+          ),
+        ),
+      )
+      .child(
+        this.row(
+          t,
+          window()?.platform === "linux" ? "Request attention" : "Bounce the Dock icon",
+          window()?.platform === "linux"
+            ? "When an agent finishes or needs you while Herdr is in the background. Independent of system notifications; the desktop controls the taskbar highlight."
+            : "When an agent needs you while Herdr is in the background.",
           this.toggle(t, "st-dock_bounce", this.person.dock_bounce === true, (_e, cx) =>
             this.change((p) => {
               if (p.dock_bounce) delete p.dock_bounce;

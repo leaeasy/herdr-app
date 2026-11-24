@@ -1,4 +1,4 @@
-# Build and test every supported platform; release.yml handles packaging.
+# Build and test Linux and macOS; release.yml handles packaging.
 #
 # Rust caches use one pinned toolchain and only master pushes save, so PR
 # caches can't evict the ones everybody restores. setup-zig caches separately.
@@ -39,7 +39,6 @@ jobs:
           # Match release's glibc floor and native platform runners.
           - { platform: linux-x86_64, runner: ubuntu-22.04 }
           - { platform: macos-aarch64, runner: macos-15 }
-          - { platform: windows-x86_64, runner: windows-2022 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -79,9 +78,6 @@ jobs:
             pkg-config clang libclang-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libvulkan-dev mesa-vulkan-drivers libfontconfig-dev libfreetype-dev
-      - name: Windows build dependencies
-        if: runner.os == 'Windows'
-        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
       - name: Keep unchanged sources fresh
         run: scripts/ci-sources restore
       # Compile the screenshot harness everywhere, even without a desktop.
@@ -112,8 +108,8 @@ jobs:
             threads=(-- --test-threads 4)
           fi
           cargo test --locked --config 'profile.dev.package."*".opt-level=0' "${only[@]}" "${threads[@]}"
-      # Windows runners lack an interactive desktop. Linux uses headless Vulkan
-      # in the suite above; macOS exercises the native window renderer here.
+      # Linux uses headless Vulkan in the suite above; macOS exercises the
+      # native window renderer here.
       - name: Screenshot pixels
         if: runner.os == 'macOS'
         timeout-minutes: 5

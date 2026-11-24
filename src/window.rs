@@ -487,6 +487,8 @@ pub struct AppWindow {
     window_active: bool,
     /// Agents with a system notification up (alert.rs), taken down once seen.
     notified: HashSet<String>,
+    /// Session binding captured while OpenCode is busy; idle clears OSC records.
+    opencode_sessions: HashMap<String, String>,
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
@@ -604,6 +606,7 @@ impl AppWindow {
             pane_history: Vec::new(),
             window_active: true,
             notified: HashSet::new(),
+            opencode_sessions: HashMap::new(),
             system_dark: is_dark(window.appearance()),
             file_events,
             polls: 0,
@@ -2332,7 +2335,20 @@ impl AppWindow {
                 live.insert(a.to_owned(), Value::Object(obj.clone()));
             }
         }
+        // OpenCode clears its per-session record before reporting root idle.
+        // Capture only an unambiguous busy binding, never infer it from a title.
+        for (addr, rec) in &live {
+            if matches!(rec.get("status").and_then(Value::as_str), Some("working" | "blocked")) {
+                self.opencode_sessions.remove(addr);
+                if let Some(session) = crate::alert::opencode_session(rec) {
+                    self.opencode_sessions.insert(addr.clone(), session);
+                }
+            }
+        }
+        self.opencode_sessions.retain(|addr, _| live.contains_key(addr));
         self.live = live;
+        #[cfg(target_os = "linux")]
+        crate::linux_launcher::update(self.live.values().map(|rec| rec.get("status").and_then(Value::as_str)));
         self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));
         // A new sub-agent changes only this list; mods that show teams need to redraw.
         let terminals_changed = mods::publish_terminals(list);
@@ -2421,19 +2437,73 @@ impl AppWindow {
             .and_then(|r| r.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned))
             .or_else(|| app.as_deref().map(crate::programs::name))
             .unwrap_or_else(|| "An agent".into());
-        // A sub-agent lives where its top agent does.
+        // A sub-agent without its own pane lives where its top agent does.
         let home = self.root_agent(addr);
-        let place = self.model.pane_of(&home).and_then(|pane| {
+        let place = self.model.pane_of(addr).or_else(|| self.model.pane_of(&home)).and_then(|pane| {
             let (p, c) = (self.model.space_of(&pane)?, self.model.tab_of(&pane)?);
-            Some(format!("{} / {}", self.model.space_name(p, &self::home()), Model::tab_name(p, c)))
+            let custom_title = c.root.find(&pane).and_then(|n| n.title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+            let address = self.model.address_of(&pane)?;
+            let terminal_title = self.terms.get(&pane).map(|t| t.view.read(cx).title.as_str()).or_else(|| {
+                self.live.get(&address).and_then(|r| r.get("title")).and_then(Value::as_str)
+            });
+            let title = custom_title.map(str::to_owned).or_else(|| {
+                terminal_title.map(crate::terminal::shown_title).map(|t| t.trim().to_owned()).filter(|s| !s.is_empty())
+            });
+            let mut place = format!("{} / {}", self.model.space_name(p, &self::home()), Model::tab_name(p, c));
+            if let Some(title) = title {
+                place.push_str(" / ");
+                place.push_str(&title);
+            }
+            Some(place)
         });
         let message = crate::alert::message_of(rec.and_then(|r| r.get("report")));
         let note = crate::alert::Note { address: addr.to_owned(), alert, name, place, message };
         if crate::alert::should_notify(settings.system_notifications, self.window_active, looking) {
-            cx.show_system_notification(crate::alert::system_notification(&note));
+            let notification = crate::alert::system_notification(&note);
+            #[cfg(target_os = "linux")]
+            let notification = gpui::SystemNotification {
+                icon: crate::alert::notification_icon(app.as_deref()),
+                ..notification
+            };
+            let enrich = crate::alert::should_read_agent_output(settings.notification_agent_output, app.as_deref(), alert, &note.message, addr);
+            if enrich {
+                let address = addr.to_owned();
+                let generation = self.model.agents.get(addr).map(|agent| agent.seq);
+                let session = self.opencode_sessions.get(addr).cloned();
+                let note = note.clone();
+                cx.spawn(async move |this, cx| {
+                    let terminal = address.clone();
+                    let text = cx.background_executor().spawn(async move {
+                        session.and_then(|session| crate::alert::opencode_output(&terminal, &session))
+                    }).await;
+                    let _ = this.update(cx, |this, cx| {
+                        // Acknowledgement removes the pending notification. A new
+                        // state advances seq even if another turn has already finished.
+                        if !this.notified.contains(&address)
+                            || this.model.agents.get(&address).map(|agent| agent.seq) != generation
+                            || !crate::alert::should_notify(settings::get().system_notifications, this.window_active, this.window_active && this.visible_addresses().contains(&address)) {
+                            return;
+                        }
+                        // Opting out while the adapter runs keeps the ordinary
+                        // notification, but discards the retrieved reply.
+                        let body = text.filter(|_| settings::get().notification_agent_output)
+                            .map(|output| note.agent_output_notification_body(&output).into())
+                            .unwrap_or_else(|| crate::alert::system_notification(&note).body);
+                        cx.show_system_notification(gpui::SystemNotification {
+                            body,
+                            ..notification
+                        });
+                    });
+                }).detach();
+            } else {
+                cx.show_system_notification(notification);
+            }
             self.notified.insert(addr.to_owned());
         }
-        if alert.needs_you() && settings.dock_bounce && !self.window_active {
+        if crate::alert::should_request_attention(alert, self.window_active, settings.dock_bounce) {
+            #[cfg(target_os = "linux")]
+            crate::linux_launcher::set_urgent(true);
+            #[cfg(not(target_os = "linux"))]
             window.request_attention();
         }
         let level = if alert.needs_you() { "error" } else { "info" };
@@ -4359,6 +4429,8 @@ impl AppWindow {
         if active != self.window_active {
             self.window_active = active;
             if active {
+                #[cfg(target_os = "linux")]
+                crate::linux_launcher::set_urgent(false);
                 self.sync(window, cx);
             } else {
                 self.looked.clear();
@@ -6949,7 +7021,7 @@ mod tests {
     }
 
     /// A status change in the core's listing posts one system notification per
-    /// agent, with the agent's own `msg` over "space / tab" and `error` told
+    /// agent, with the agent's own `msg` over "space / tab / pane" and `error` told
     /// apart from `blocked`, as `system_notifications` says and never for the
     /// agent on screen; it is taken down when the agent works again or goes
     /// away, and clicking one goes to that agent.
@@ -6965,11 +7037,12 @@ mod tests {
         view.update(cx, |this, _| {
             this.model.add_space("p1", "api", "/src/api", crate::model::Tab::new("c1", "fix login", "x1", "t1"));
             this.model.add_space("p2", "web", "/src/web", crate::model::Tab::new("c2", "tests", "x2", "t2"));
+            this.model.tab_mut("c2").unwrap().root.find_mut("x2").unwrap().title = Some("notification permissions".into());
         });
         // t1 is on screen; t2 is in another space.
         let list = |mode: SystemNotifications, active: bool, t1: &str, t2: Option<serde_json::Value>, cx: &mut gpui::VisualTestContext| {
             let mut terminals = vec![json!({ "address": "t1", "name": "Claude", "status": { "state": t1, "app": "claude-code" } })];
-            terminals.extend(t2.map(|status| json!({ "address": "t2", "name": "Codex", "status": status })));
+            terminals.extend(t2.map(|status| json!({ "address": "t2", "name": "Codex", "title": "⠋ Fix notifications", "status": status })));
             cx.update(|window, cx| view.update(cx, |this, cx| {
                 this.person.sounds.enabled = false;
                 this.person.system_notifications = mode;
@@ -6995,13 +7068,17 @@ mod tests {
         list(Background, false, "working", blocked(), cx);
         let shown = cx.shown_system_notifications();
         assert_eq!(shown.len(), 1);
-        assert_eq!((shown[0].tag.as_ref(), shown[0].title.as_ref(), shown[0].body.as_ref()), ("herdr-agent:t2", "Codex needs you", "approve Bash: make\nweb / tests"));
+        assert_eq!((shown[0].tag.as_ref(), shown[0].title.as_ref(), shown[0].body.as_ref()), ("herdr-agent:t2", "Codex needs you", "approve Bash: make\nweb / tests / notification permissions"));
+
+        view.update(cx, |this, _| {
+            this.model.tab_mut("c2").unwrap().root.find_mut("x2").unwrap().title = None;
+        });
 
         list(Always, true, "working", working(), cx);
         assert!(cx.delivered_system_notifications().is_empty(), "back at work takes it down");
         list(Always, true, "working", error(), cx);
         let delivered = cx.delivered_system_notifications();
-        assert_eq!(delivered.iter().map(|n| (n.title.to_string(), n.body.to_string())).collect::<Vec<_>>(), [("Codex hit an error".to_owned(), "web / tests".to_owned())], "an old message doesn't linger");
+        assert_eq!(delivered.iter().map(|n| (n.title.to_string(), n.body.to_string())).collect::<Vec<_>>(), [("Codex hit an error".to_owned(), "web / tests / Fix notifications".to_owned())], "an old message doesn't linger; terminal title is used without its spinner when unnamed");
         list(Always, true, "working", None, cx);
         assert!(cx.delivered_system_notifications().is_empty(), "an agent gone takes it down");
 

@@ -760,19 +760,77 @@ What's about the user, never a look:
   (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
   including the Play buttons in Settings > Alerts.
 - `system_notifications`: `"background"` (default), `"always"` or `"off"`.
-  The same alerts also go to the system's notification center, titled as
-  the toast ("<name> needs you", "<name> hit an error", "<name> finished"),
-  with the agent's own message from its status report (e.g. "approve Bash:
-  make"), when it gave one, above "space / tab" as the body. One per agent:
-  a newer alert replaces the older one. `background` sends them only while
-  Herdr isn't the app in front; `always` also while it is. Never for the
+  The same alerts also go to the system's notification center, titled
+  "space / tab / pane title" (one line, up to 160 characters, then an ellipsis).
+  Without a location, the title falls back to the alert status.
+  The body starts with the toast status ("<name> needs you", "<name> hit an
+  error", "<name> finished"), followed by the agent's own status-report message
+  (e.g. "approve Bash: make") when present. The message keeps up to four
+  non-empty lines and 500 characters; longer content ends in an ellipsis.
+  Without a message, only the status is shown unless `notification_agent_output`
+  is enabled (below). Location is not repeated in the body.
+  The pane title uses its custom name, otherwise its terminal title; empty
+  titles are omitted. Sub-agents without a pane use their top agent's pane.
+  On Linux, system notifications use the reported agent's icon from the
+  programs table (including personal `programs.json` overrides). Missing
+  icon files leave the desktop's default icon behavior unchanged.
+  Linux notifications use normal urgency and are non-transient so desktops can keep them in their
+  notification history; retention follows the desktop's settings. Clicking
+  uses the desktop's Wayland activation token when provided to bring Herdr forward.
+  They identify as `herdr-app` (the installed desktop entry) for desktop notification settings.
+  One per agent: a newer alert replaces the older one. `background` sends
+  them only while Herdr isn't the app in front; `always` also while it is. Never for the
   agent the person is looking at. Clicking one brings Herdr forward on that
   agent; it goes away once the person looks at the agent, it starts working
   again or it ends. The toast shows either way. macOS asks permission the
   first time one is sent; a build not run from an app bundle sends none.
+- `notification_agent_output`: `false` by default. Opt in with `true` or
+  Settings > Alerts > Notifications > Include agent's last reply. For local
+  OpenCode completion notifications on Linux without a status-report message,
+  Herdr reads the final assistant text through OpenCode V2's API using the
+  session captured while it was working. Requires `python3`, `hc`, and
+  `opencode` on PATH and the same local OpenCode service as the terminal.
+  Only text is used, not reasoning or tool output; no model summarizes it and
+  the terminal screen is never read. The adapter returns the full reply;
+  Herdr keeps its first three non-empty lines within 200 characters combined
+  (including separators and any ellipsis), then the complete last non-empty
+  line without duplication or a character limit. Omitted content gets an ellipsis.
+  Retrieved replies replace the status line when available. Markdown is parsed
+  into notification-safe HTML: bold, emphasis and headings use supported markup;
+  lists use bullets and code/links stay text. Raw HTML is escaped, never executed.
+  Rendering depends on the Linux desktop's notification markup support.
+  When available, a plain statistics line after the reply uses
+  `GPT-6.1 Sol · 31.9s · 50.7 tok/s`: final reply model, whole-turn elapsed
+  time (including tools and user waits), and final reply output tokens per
+  second of streaming (first token to stream end, or completion if absent).
+  Missing statistics are omitted, not shown as zero.
+  Existing status-report messages keep their four-line rule. Replies may appear
+  on the lock screen and in notification history.
+  Unsupported agents, ambiguous sessions, missing tools, failed/unfinished
+  executions, and API errors keep the ordinary notification. Disabled means
+  no reply retrieval; existing status-report messages are unaffected.
+  `system_notifications: "off"` also prevents retrieval and disables the
+  checkbox without forgetting its choice. Changes apply live: opting out
+  during retrieval discards the reply and keeps the ordinary notification.
+  Retrieval runs in the background (each subprocess times out after three
+  seconds); focus or a new agent state cancels the pending notification.
+- Linux taskbar badge: the Herdr icon shows the number of agents currently
+  reporting `working` across all spaces (including remote terminals and
+  sub-agents). This count is always enabled and independent of attention and
+  notifications. It uses the built-in `zbus` library on the session bus with the Unity
+  LauncherEntry protocol and `application://herdr-app.desktop`; Plasma and
+  other supporting launchers control its appearance. Zero hides the badge;
+  normal quit attempts to clear it. No external `gdbus` command is required;
+  a failed bus connection or call does not affect the app. No reply content
+  is sent, only the count.
 - `dock_bounce`: `true` bounces the Dock icon when an agent needs the
   person (blocked or stopped on an error) while Herdr is in the background.
-  Off by default.
+  On Linux this is Settings > Alerts > Notifications > Request attention:
+  it covers completion as well as blocked/error and sends `urgent: true`
+  through Unity LauncherEntry without requesting window activation. Returning
+  to the foreground or normal quit clears urgency. KDE controls the taskbar
+  highlight; launchers without this protocol may ignore it. Off by default,
+  independent of system notifications and reply retrieval; changes apply live.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
