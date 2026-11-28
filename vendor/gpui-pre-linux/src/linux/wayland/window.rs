@@ -29,6 +29,7 @@ use wayland_protocols::{
     xdg::dialog::v1::client::xdg_dialog_v1::XdgDialogV1,
 };
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
+use wayland_protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
 use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
@@ -108,6 +109,7 @@ pub struct WaylandWindowState {
     app_id: Option<String>,
     appearance: WindowAppearance,
     blur: Option<org_kde_kwin_blur::OrgKdeKwinBlur>,
+    background_effect: Option<ExtBackgroundEffectSurfaceV1>,
     viewport: Option<wp_viewport::WpViewport>,
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
@@ -610,6 +612,7 @@ impl WaylandWindowState {
             surface,
             app_id: options.app_id,
             blur: None,
+            background_effect: None,
             viewport,
             globals,
             outputs: HashMap::default(),
@@ -777,6 +780,9 @@ impl Drop for WaylandWindow {
         state.renderer.take();
 
         // Destroy blur first, this has no dependencies.
+        if let Some(effect) = &state.background_effect {
+            effect.destroy();
+        }
         if let Some(blur) = &state.blur {
             blur.release();
         }
@@ -1159,6 +1165,8 @@ impl WaylandWindowStatePtr {
 
             let initial_configure = self.frame_loop.get() == FrameLoop::Unconfigured;
             drop(state);
+            // HERDR: fullscreen/maximize and resize change the blur region too.
+            update_window(self.state.borrow_mut());
             if initial_configure {
                 self.frame(None, FrameRequestSource::NativeCallback);
             } else {
@@ -1816,6 +1824,17 @@ impl PlatformWindow for WaylandWindow {
         // Try to request an activation token. Even though the activation is likely going to be rejected,
         // KWin and Mutter can use the app_id to visually indicate we're requesting attention.
         let state = self.borrow();
+        let notification_token = state
+            .client
+            .get_client()
+            .borrow()
+            .common
+            .borrow()
+            .take_notification_activation_token();
+        if let (Some(activation), Some(token)) = (&state.globals.activation, notification_token) {
+            activation.activate(token, &state.surface);
+            return;
+        }
         if let (Some(activation), Some(app_id)) = (&state.globals.activation, state.app_id.clone())
         {
             state.client.set_pending_activation(state.surface.id());
@@ -2253,8 +2272,13 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
     if let Some(renderer) = &mut state.renderer {
         renderer.update_transparency(!opaque);
     }
-    let opaque_area = state.window_bounds.map(|v| f32::from(v) as i32);
-    opaque_area.inset(f32::from(state.inset()) as i32);
+    // window_bounds is the saved windowed geometry, not the current surface.
+    let opaque_area = background_effect_bounds(
+        state.bounds.map_origin(|_| px(0.0)),
+        state.inset(),
+        state.tiling,
+        state.fullscreen,
+    ).map(|v| f32::from(v) as i32);
 
     let region = state
         .globals
@@ -2280,7 +2304,19 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
         state.surface.set_opaque_region(None);
     }
 
-    if let Some(ref blur_manager) = state.globals.blur_manager {
+    // HERDR: newer KWin exposes the standard extension instead of KDE blur.
+    // Region state is double-buffered and applied on the next surface commit.
+    if let Some(ref manager) = state.globals.background_effect_manager {
+        if state.background_appearance == WindowBackgroundAppearance::Blurred {
+            if state.background_effect.is_none() {
+                let effect = manager.get_background_effect(&state.surface, &state.globals.qh, ());
+                state.background_effect = Some(effect);
+            }
+            state.background_effect.as_ref().unwrap().set_blur_region(Some(&region));
+        } else if let Some(effect) = &state.background_effect {
+            effect.set_blur_region(None);
+        }
+    } else if let Some(ref blur_manager) = state.globals.blur_manager {
         if state.background_appearance == WindowBackgroundAppearance::Blurred {
             if state.blur.is_none() {
                 let blur = blur_manager.create(&state.surface, &state.globals.qh, ());
@@ -2355,6 +2391,24 @@ fn compute_outer_size(
 
         new_size
     })
+}
+
+fn background_effect_bounds(bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling, fullscreen: bool) -> Bounds<Pixels> {
+    inset_by_tiling(bounds, if fullscreen { px(0.0) } else { inset }, tiling)
+}
+
+#[cfg(test)]
+mod background_effect_tests {
+    use super::*;
+    use gpui::point;
+
+    #[test]
+    fn fullscreen_blur_covers_current_surface_without_saved_decoration_insets() {
+        let current = Bounds { origin: point(px(0.0), px(0.0)), size: size(px(1920.0), px(1080.0)) };
+        assert_eq!(background_effect_bounds(current, px(12.0), Tiling::default(), true), current);
+        assert_eq!(background_effect_bounds(current, px(12.0), Tiling::default(), false),
+            Bounds { origin: point(px(12.0), px(12.0)), size: size(px(1896.0), px(1056.0)) });
+    }
 }
 
 fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) -> Bounds<Pixels> {

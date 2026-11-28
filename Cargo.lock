@@ -3190,6 +3190,7 @@ dependencies = [
  "wayland-protocols-wlr",
  "x11rb",
  "xkbcommon",
+ "zbus",
  "zed-scap",
  "zed-xim",
 ]
@@ -3713,6 +3714,7 @@ dependencies = [
  "gpui-shell",
  "image",
  "libc",
+ "markdown",
  "notify",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -3733,6 +3735,7 @@ dependencies = [
  "uds_windows",
  "windows-sys 0.61.2",
  "winresource",
+ "zbus",
 ]
 
 [[package]]

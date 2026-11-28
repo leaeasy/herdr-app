@@ -96,6 +96,7 @@ pub(crate) struct LinuxCommon {
     pub(crate) signal: LoopSignal,
     pub(crate) menus: Vec<OwnedMenu>,
     app_name: Option<String>,
+    app_identifier: Option<String>,
     system_notifications: crate::linux::system_notifications::SystemNotificationState,
     #[cfg_attr(
         not(all(target_os = "linux", any(feature = "wayland", feature = "x11"))),
@@ -111,6 +112,10 @@ pub(crate) struct LinuxCommon {
 }
 
 impl LinuxCommon {
+    pub(crate) fn take_notification_activation_token(&self) -> Option<String> {
+        self.system_notifications.take_activation_token()
+    }
+
     pub fn new(
         signal: LoopSignal,
     ) -> (
@@ -149,6 +154,7 @@ impl LinuxCommon {
             signal,
             menus: Vec::new(),
             app_name: None,
+            app_identifier: None,
             system_notifications: crate::linux::system_notifications::SystemNotificationState::new(
             ),
             power_sender,
@@ -930,15 +936,18 @@ impl Platform for LinuxPlatform {
         });
     }
 
-    fn set_app_identity(&self, _identifier: &str, name: &str) {
-        self.with_common(|common| common.app_name = Some(name.to_string()));
+    fn set_app_identity(&self, identifier: &str, name: &str) {
+        self.with_common(|common| {
+            common.app_name = Some(name.to_string());
+            common.app_identifier = Some(identifier.to_string());
+        });
     }
 
     fn show_system_notification(&self, notification: gpui::SystemNotification) {
         self.with_common(|common| {
             common
                 .system_notifications
-                .show(common.app_name.as_deref(), notification)
+                .show(common.app_name.as_deref(), common.app_identifier.as_deref(), notification)
         });
     }
 

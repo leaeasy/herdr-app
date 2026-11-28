@@ -607,8 +607,12 @@ pub struct SystemNotification {
     pub title: SharedString,
     /// Additional text displayed below the title.
     pub body: SharedString,
+    /// Optional local icon path for Linux desktop notifications. Other platforms ignore it.
+    pub icon: Option<SharedString>,
     /// Buttons offered on the notification. Platforms that cannot display
     /// action buttons show the notification without them.
+    /// On Linux, notifications with buttons bypass desktop history and stay
+    /// visible until acted on, dismissed, or withdrawn by the application.
     pub actions: Vec<SystemNotificationAction>,
 }
 

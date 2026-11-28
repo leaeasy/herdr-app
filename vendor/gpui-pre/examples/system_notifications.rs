@@ -46,6 +46,7 @@ impl Render for SystemNotificationExample {
                                 tag: NOTIFICATION_TAG.into(),
                                 title: format!("Example notification {revision}").into(),
                                 body: "This notification was posted by the GPUI example.".into(),
+                                icon: None,
                                 actions: vec![
                                     SystemNotificationAction {
                                         id: "open".into(),

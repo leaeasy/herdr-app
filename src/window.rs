@@ -148,12 +148,16 @@ fn launch_failure(record: &Value, output: &str) -> Option<String> {
 /// sidebar, tab bar).
 const LAYOUTS: &[(&str, &str)] = &[
     ("main", include_str!("../defaults/layouts/main.json")),
+    ("Plasma", include_str!("../defaults/layouts/Plasma.json")),
     ("terminals", include_str!("../defaults/layouts/terminals.json")),
     ("win98", include_str!("../defaults/layouts/win98.json")),
 ];
 
 /// Pictures shipped layouts name as their `preview`, written beside them.
-const LAYOUT_PREVIEWS: &[(&str, &str)] = &[("win98.svg", include_str!("../defaults/layouts/win98.svg"))];
+const LAYOUT_PREVIEWS: &[(&str, &str)] = &[
+    ("win98.svg", include_str!("../defaults/layouts/win98.svg")),
+    ("Plasma.svg", include_str!("../defaults/layouts/Plasma.svg")),
+];
 
 pub fn shipped_layouts() -> Vec<&'static str> {
     LAYOUTS.iter().map(|(n, _)| *n).collect()
@@ -489,6 +493,8 @@ pub struct AppWindow {
     notified: HashSet<String>,
     /// Session binding captured while OpenCode is busy; idle clears OSC records.
     opencode_sessions: HashMap<String, String>,
+    /// Notification buttons, bound to the agent state that produced them.
+    notification_inputs: HashMap<String, (u64, crate::alert::AgentInput)>,
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
@@ -607,6 +613,7 @@ impl AppWindow {
             window_active: true,
             notified: HashSet::new(),
             opencode_sessions: HashMap::new(),
+            notification_inputs: HashMap::new(),
             system_dark: is_dark(window.appearance()),
             file_events,
             polls: 0,
@@ -672,6 +679,36 @@ impl AppWindow {
         let (handle, this) = (window.window_handle(), cx.entity().downgrade());
         cx.on_system_notification_response(move |response, cx| {
             let Some(addr) = crate::alert::address_of(&response.tag).map(str::to_owned) else { return };
+            if let Some(action) = response.action_id.as_deref() {
+                let Some((generation, index)) = crate::alert::input_action(action) else { return };
+                let _ = this.update(cx, |this, cx| {
+                    if this.model.agents.get(&addr).is_none_or(|agent| agent.seq != generation || agent.word.as_deref() != Some("blocked"))
+                        || settings::get().system_notifications == settings::SystemNotifications::Off {
+                        return;
+                    }
+                    let Some((seq, input)) = this.notification_inputs.get(&addr) else { return };
+                    if *seq != generation { return; }
+                    let input = input.clone();
+                    // Consume before dispatch, so duplicate desktop callbacks cannot reply twice.
+                    this.notification_inputs.remove(&addr);
+                    cx.spawn(async move |this, cx| {
+                        let success = cx.background_executor().spawn(async move { input.reply(index) }).await;
+                        if !success {
+                            let _ = this.update(cx, |_this, cx| {
+                                tracing::warn!("notification reply failed or request expired; answer in the terminal");
+                                cx.show_system_notification(gpui::SystemNotification {
+                                    tag: crate::alert::tag(&addr).into(),
+                                    title: "Agent reply was not sent".into(),
+                                    body: "The request changed or could not be reached. Click to answer in the terminal.".into(),
+                                    icon: None,
+                                    actions: Vec::new(),
+                                });
+                            });
+                        }
+                    }).detach();
+                });
+                return;
+            }
             cx.activate(true);
             let _ = handle.update(cx, |_, window, cx| {
                 window.activate_window();
@@ -2378,7 +2415,8 @@ impl AppWindow {
                 alerts.push((addr.clone(), alert, looking));
             }
             // Seen, or back at work: its notification is old news.
-            if (looking || word.as_deref() == Some("working")) && self.notified.remove(addr) {
+            let input_ended = self.notification_inputs.contains_key(addr) && word.as_deref() != Some("blocked");
+            if (looking || word.as_deref() == Some("working") || input_ended) && self.notified.remove(addr) {
                 cx.dismiss_system_notification(&crate::alert::tag(addr));
             }
             changed |= self.model.set_word(addr, word, app, looking);
@@ -2391,6 +2429,10 @@ impl AppWindow {
             cx.dismiss_system_notification(&crate::alert::tag(&gone));
         }
         changed |= self.share_seen(cx);
+        self.notification_inputs.retain(|addr, (seq, _)| {
+            self.notified.contains(addr) && self.model.agents.get(addr)
+                .is_some_and(|agent| agent.seq == *seq && agent.word.as_deref() == Some("blocked"))
+        });
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
             for (addr, alert, looking) in alerts {
@@ -2466,7 +2508,29 @@ impl AppWindow {
                 ..notification
             };
             let enrich = crate::alert::should_read_agent_output(settings.notification_agent_output, app.as_deref(), alert, &note.message, addr);
-            if enrich {
+            if cfg!(target_os = "linux") && alert == model::Alert::Blocked {
+                let address = addr.to_owned();
+                let generation = self.model.agents.get(addr).map(|agent| agent.seq);
+                cx.spawn(async move |this, cx| {
+                    let terminal = address.clone();
+                    let input = cx.background_executor().spawn(async move {
+                        crate::alert::AgentInput::read(&terminal)
+                    }).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if !this.notified.contains(&address)
+                            || this.model.agents.get(&address).map(|agent| agent.seq) != generation
+                            || !crate::alert::should_notify(settings::get().system_notifications, this.window_active, this.window_active && this.visible_addresses().contains(&address)) {
+                            return;
+                        }
+                        if let (Some(input), Some(generation)) = (input, generation) {
+                            cx.show_system_notification(input.notification(notification, generation));
+                            this.notification_inputs.insert(address, (generation, input));
+                        } else {
+                            cx.show_system_notification(notification);
+                        }
+                    });
+                }).detach();
+            } else if enrich {
                 let address = addr.to_owned();
                 let generation = self.model.agents.get(addr).map(|agent| agent.seq);
                 let session = self.opencode_sessions.get(addr).cloned();
@@ -5798,7 +5862,9 @@ impl Render for AppWindow {
             .key_context(key_context("Herdr", "layout", &self.layout_name))
             .size_full()
             .relative()
-            .bg(c("background"))
+            // Glass layouts paint their own opaque regions. An unconditional
+            // backing here hides the desktop beneath translucent sidebars.
+            .when(!self.chrome.window_blur, |el| el.bg(c("background")))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
@@ -7050,6 +7116,12 @@ mod tests {
                 this.window_active = active;
                 this.terminals_listed(json!({ "terminals": terminals }), window, cx);
             }));
+            cx.run_until_parked();
+            view.update(cx, |this, cx| {
+                if let Some(term) = this.terms.get("x2") {
+                    term.view.update(cx, |view, _| view.title = "⠋ Fix notifications".into());
+                }
+            });
         };
         let working = || Some(json!({ "state": "working", "app": "codex" }));
         let blocked = || Some(json!({ "state": "blocked", "kind": "permission", "app": "codex", "msg": "approve Bash: make" }));
@@ -7068,7 +7140,7 @@ mod tests {
         list(Background, false, "working", blocked(), cx);
         let shown = cx.shown_system_notifications();
         assert_eq!(shown.len(), 1);
-        assert_eq!((shown[0].tag.as_ref(), shown[0].title.as_ref(), shown[0].body.as_ref()), ("herdr-agent:t2", "Codex needs you", "approve Bash: make\nweb / tests / notification permissions"));
+        assert_eq!((shown[0].tag.as_ref(), shown[0].title.as_ref(), shown[0].body.as_ref()), ("herdr-agent:t2", "web / tests / notification permissions", "Codex needs you\napprove Bash: make"));
 
         view.update(cx, |this, _| {
             this.model.tab_mut("c2").unwrap().root.find_mut("x2").unwrap().title = None;
@@ -7078,15 +7150,47 @@ mod tests {
         assert!(cx.delivered_system_notifications().is_empty(), "back at work takes it down");
         list(Always, true, "working", error(), cx);
         let delivered = cx.delivered_system_notifications();
-        assert_eq!(delivered.iter().map(|n| (n.title.to_string(), n.body.to_string())).collect::<Vec<_>>(), [("Codex hit an error".to_owned(), "web / tests / Fix notifications".to_owned())], "an old message doesn't linger; terminal title is used without its spinner when unnamed");
+        assert_eq!(delivered.iter().map(|n| (n.title.to_string(), n.body.to_string())).collect::<Vec<_>>(), [("web / tests / Fix notifications".to_owned(), "Codex hit an error".to_owned())], "an old message doesn't linger; terminal title is used without its spinner when unnamed");
         list(Always, true, "working", None, cx);
         assert!(cx.delivered_system_notifications().is_empty(), "an agent gone takes it down");
+
+        list(Always, false, "working", working(), cx);
+        list(Always, false, "working", blocked(), cx);
+        let (generation, shown_before_reply) = view.update(cx, |this, _| {
+            let generation = this.model.agents["t2"].seq;
+            let input = serde_json::from_value(json!({})).unwrap();
+            this.notification_inputs.insert("t2".into(), (generation, input));
+            (generation, this.shown_agent())
+        });
+        cx.simulate_system_notification_response(gpui::SystemNotificationResponse {
+            tag: "herdr-agent:t2".into(), action_id: Some(format!("agent-input:{}:0", generation - 1).into()),
+        });
+        cx.run_until_parked();
+        assert!(view.update(cx, |this, _| this.notification_inputs.contains_key("t2")), "an old button cannot consume a new request");
+        for _ in 0..2 {
+            cx.simulate_system_notification_response(gpui::SystemNotificationResponse {
+                tag: "herdr-agent:t2".into(), action_id: Some(format!("agent-input:{generation}:0").into()),
+            });
+            cx.run_until_parked();
+            view.update(cx, |this, _| {
+                assert!(!this.notification_inputs.contains_key("t2"), "a button is consumed before replying");
+                assert_eq!(this.shown_agent(), shown_before_reply, "reply buttons do not switch the active agent");
+            });
+        }
+
+        view.update(cx, |this, _| {
+            let input = serde_json::from_value(json!({})).unwrap();
+            this.notification_inputs.insert("t2".into(), (generation, input));
+        });
+        list(Always, false, "working", Some(json!(null)), cx);
+        assert!(cx.delivered_system_notifications().is_empty(), "a cleared status withdraws the prompt even without a working transition");
+        assert!(view.update(cx, |this, _| this.notification_inputs.is_empty()));
 
         list(Always, false, "working", working(), cx);
         list(Always, false, "working", error(), cx);
         list(Always, false, "working", Some(json!({ "state": "idle", "app": "codex" })), cx);
         let delivered = cx.delivered_system_notifications();
-        assert_eq!(delivered.iter().map(|n| n.title.to_string()).collect::<Vec<_>>(), ["Codex finished"], "one per agent: the newer replaces the older");
+        assert_eq!(delivered.iter().map(|n| (n.title.to_string(), n.body.to_string())).collect::<Vec<_>>(), [("web / tests / Fix notifications".to_owned(), "Codex finished".to_owned())], "one per agent: the newer replaces the older");
         cx.simulate_system_notification_response(gpui::SystemNotificationResponse { tag: "herdr-agent:t2".into(), action_id: None });
         cx.run_until_parked();
         view.update(cx, |this, _| {

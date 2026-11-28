@@ -163,6 +163,9 @@ features = [
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.notify-rust]
 version = "4"
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.zbus]
+version = "5"
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.oo7]
 version = "0.6"
 features = [

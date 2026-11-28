@@ -279,6 +279,17 @@ Properties any node can have:
   then show the desktop through frosted glass: make `background` and
   `canvas` transparent and give the sidebar a translucent `chrome`
   (`"#0b102466"`). Nodes with solid colors stay solid.
+  The shipped `Plasma` layout keeps the main workspace opaque and uses a
+  theme-tinted translucent Spaces/Agents area. The sidebar header and footer stay opaque.
+  Its Spaces/Agents mods use `props: {"glass": true}` to tint their backgrounds
+  with the current theme's chrome at 60% opacity, following light/dark changes;
+  without this prop their backgrounds stay unchanged.
+  Select it in Settings' layout picker; `main` stays
+  unchanged. KDE Plasma Wayland with KWin's Blur effect enabled is the intended
+  target; other compositors may show transparency without blur. X11 blur is
+  not guaranteed. This layout does not change your desktop's effect settings.
+  Wayland blur supports both the standard background-effect protocol used by
+  newer KWin and the older KDE blur protocol.
 - Root only: `"preview": "layouts/<name>.svg"` (or png): the picture the
   settings screen shows for this layout. Draw one when you make a layout;
   without it the person sees a plain frame. New layouts and `themes/*.json`
@@ -774,8 +785,9 @@ What's about the user, never a look:
   On Linux, system notifications use the reported agent's icon from the
   programs table (including personal `programs.json` overrides). Missing
   icon files leave the desktop's default icon behavior unchanged.
-  Linux notifications use normal urgency and are non-transient so desktops can keep them in their
-  notification history; retention follows the desktop's settings. Clicking
+  Linux notifications use normal urgency. Notifications without reply buttons
+  are non-transient so desktops can keep them in notification history;
+  retention follows the desktop's settings. Clicking
   uses the desktop's Wayland activation token when provided to bring Herdr forward.
   They identify as `herdr-app` (the installed desktop entry) for desktop notification settings.
   One per agent: a newer alert replaces the older one. `background` sends
@@ -784,6 +796,19 @@ What's about the user, never a look:
   agent; it goes away once the person looks at the agent, it starts working
   again or it ends. The toast shows either way. macOS asks permission the
   first time one is sent; a build not run from an app bundle sends none.
+- On Linux, blocked-agent system notifications offer **确认** and **取消**
+  buttons. Clicking sends only Enter or Esc, respectively, through `hc keys`
+  without focusing the window. Requires `hc` on PATH.
+  These interactive notifications do not enter the desktop's notification
+  history and do not automatically expire. They close on a click or manual
+  dismissal, when the agent is viewed or its request ends, or when replaced
+  by a newer alert for that agent.
+  No input is sent automatically. Buttons recheck the blocked status, turn and
+  session records; old notifications and repeated clicks cannot reply to a
+  newer agent state.
+  Failed or expired replies show a notification linking back to the terminal.
+  `system_notifications: "off"` disables these buttons; this feature
+  is independent of completion-reply retrieval and taskbar attention.
 - `notification_agent_output`: `false` by default. Opt in with `true` or
   Settings > Alerts > Notifications > Include agent's last reply. For local
   OpenCode completion notifications on Linux without a status-report message,

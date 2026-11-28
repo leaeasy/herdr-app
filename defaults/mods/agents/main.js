@@ -422,7 +422,7 @@ export default class Agents extends View {
     return v_flex()
       .size_full()
       .min_h(0)
-      .bg(t.chrome)
+      .bg(props()?.glass ? `${t.chrome.slice(0, 7)}99` : t.chrome)
       .border_t(1)
       .border_color(t.border)
       .text_size(13)

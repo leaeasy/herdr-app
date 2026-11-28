@@ -85,6 +85,80 @@ pub fn opencode_session(record: &Value) -> Option<String> {
     sessions.next().is_none().then_some(session)
 }
 
+/// A blocked terminal snapshot, rechecked before sending Enter or Escape.
+#[derive(Clone, Debug)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+pub struct AgentInput(Value);
+
+impl AgentInput {
+    #[cfg(test)]
+    pub fn read(_address: &str) -> Option<Self> { None }
+
+    #[cfg(not(test))]
+    pub fn read(address: &str) -> Option<Self> {
+        Self::read_terminal(address)
+    }
+
+    fn read_terminal(address: &str) -> Option<Self> {
+        let output = crate::spawn::detached_command("hc")
+            .args(["get", address, "--json"])
+            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .output().ok()?;
+        if !output.status.success() { return None; }
+        let record: Value = serde_json::from_slice(&output.stdout).ok()?;
+        Some(Self(serde_json::json!({"terminal": address, "binding": blocked_binding(&record)?})))
+    }
+
+    pub fn notification(&self, mut note: SystemNotification, generation: u64) -> SystemNotification {
+        note.actions = ["确认", "取消"].into_iter().enumerate().map(|(index, label)| {
+            gpui::SystemNotificationAction {
+                id: format!("agent-input:{generation}:{index}").into(),
+                label: label.into(),
+            }
+        }).collect();
+        note
+    }
+
+    #[cfg(test)]
+    pub fn reply(&self, _index: usize) -> bool { true }
+
+    #[cfg(not(test))]
+    pub fn reply(&self, index: usize) -> bool {
+        self.send_key(index)
+    }
+
+    fn send_key(&self, index: usize) -> bool {
+        let (Some(address), Some(key)) = (self.0["terminal"].as_str(), input_key(index)) else { return false };
+        let Some(current) = Self::read_terminal(address) else { return false };
+        if current.0["binding"] != self.0["binding"] { return false; }
+        crate::spawn::detached_command("hc")
+            .args(["keys", address, key, "--json"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status().is_ok_and(|status| status.success())
+    }
+}
+
+fn blocked_binding(record: &Value) -> Option<Value> {
+    let status = record.get("status")?;
+    if status.get("state").and_then(Value::as_str).or_else(|| status.as_str()) != Some("blocked") {
+        return None;
+    }
+    Some(serde_json::json!({
+        "status": status, "turn": record.get("turn"), "records": record.get("records"),
+    }))
+}
+
+pub fn input_key(index: usize) -> Option<&'static str> {
+    match index { 0 => Some("enter"), 1 => Some("esc"), _ => None }
+}
+
+pub fn input_action(action: &str) -> Option<(u64, usize)> {
+    let (generation, index) = action.strip_prefix("agent-input:")?.split_once(':')?;
+    let index = index.parse().ok()?;
+    input_key(index)?;
+    Some((generation.parse().ok()?, index))
+}
+
 /// One alert, as the system notification shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Note {
@@ -271,6 +345,76 @@ fn notification_icon_path(program: &Value, home: &std::path::Path) -> Option<gpu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_input_buttons_bind_generation_to_enter_and_escape() {
+        let input = AgentInput(serde_json::json!({}));
+        let original = system_notification(&note(Alert::Blocked));
+        let notification = input.notification(original.clone(), 42);
+        assert_eq!(notification.body, original.body);
+        assert_eq!(notification.actions.len(), 2);
+        assert_eq!(notification.actions[0].label.as_ref(), "确认");
+        assert_eq!(notification.actions[1].label.as_ref(), "取消");
+        assert_eq!(input_action(&notification.actions[1].id), Some((42, 1)));
+        assert_eq!(input_key(0), Some("enter"));
+        assert_eq!(input_key(1), Some("esc"));
+        for invalid in ["default", "agent-input:42", "agent-input:42:1:2", "agent-input:x:0", "agent-input:1:-1", "agent-input:42:2"] {
+            assert_eq!(input_action(invalid), None);
+        }
+    }
+
+    #[test]
+    fn notification_input_binding_rejects_resolved_requests_and_tracks_turns() {
+        let record = serde_json::json!({"status": {"state": "blocked", "app": "codex"}, "turn": 1});
+        let snapshot = blocked_binding(&record).unwrap();
+        let mut changed = record.clone();
+        changed["turn"] = 2.into();
+        assert_ne!(blocked_binding(&changed).unwrap(), snapshot);
+        for state in ["working", "idle", "done", "error"] {
+            changed["status"]["state"] = state.into();
+            assert!(blocked_binding(&changed).is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an isolated test core and scratch XDG_STATE_HOME"]
+    fn notification_input_delivers_only_enter_and_escape() {
+        use std::{process::Command, time::{Duration, Instant}};
+        assert!(std::env::var("HC_SESSION").unwrap().starts_with("test-"));
+        let state = std::path::PathBuf::from(std::env::var("XDG_STATE_HOME").unwrap());
+        assert!(state.starts_with("/tmp"));
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/notification-agent.py");
+        for (index, expected) in [(0, "0d"), (1, "1b")] {
+            let result = state.join(format!("key-{index}.json"));
+            let output = Command::new("hc").args(["run", "--bg", "--no-parent", "--json", "python3"])
+                .arg(&fixture).args(["--delay", "0.1", "--timeout", "30", "--result"])
+                .arg(&result).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let started: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let address = started["address"].as_str().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let input = loop {
+                if let Some(input) = AgentInput::read_terminal(address) { break input; }
+                assert!(Instant::now() < deadline, "fixture never reported blocked");
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            assert!(!result.exists(), "input was sent without a button click");
+            assert!(input.send_key(index));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !result.exists() {
+                assert!(Instant::now() < deadline, "fixture received no key");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let received: Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
+            assert_eq!(received["received_hex"], expected);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while AgentInput::read_terminal(address).is_some() {
+                assert!(Instant::now() < deadline, "fixture still blocked after reply");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(!input.send_key(index), "resolved request accepted a stale click");
+        }
+    }
 
     #[test]
     fn opencode_session_requires_one_matching_record() {
